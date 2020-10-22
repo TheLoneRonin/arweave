@@ -167,9 +167,9 @@ init([]) ->
 		disk_pool_cursor = first,
 		missing_data_cursor = first
 	},
-	gen_server:cast(self(), update_peer_sync_records),
-	gen_server:cast(self(), {sync_random_interval, []}),
-	gen_server:cast(self(), compact_intervals),
+	gen_server:cast(self(), check_space_update_peer_sync_records),
+	gen_server:cast(self(), check_space_sync_random_interval),
+	gen_server:cast(self(), check_space_compact_intervals),
 	gen_server:cast(self(), update_disk_pool_data_roots),
 	gen_server:cast(self(), process_disk_pool_item),
 	{ok, State2}.
@@ -306,6 +306,15 @@ handle_cast({add_block, B, SizeTaggedTXs}, State) ->
 	add_block(B, SizeTaggedTXs, State),
 	{noreply, State};
 
+handle_cast(check_space_update_peer_sync_records, State) ->
+	case ar_storage:get_free_space() - ?DISK_DATA_BUFFER_SIZE > 0 of
+		true ->
+			gen_server:cast(self(), update_peer_sync_records);
+		false ->
+			cast_after(?FREE_SPACE_CHECK_FREQUENCY_MS, check_space_update_peer_sync_records)
+	end,
+	{noreply, State};
+
 handle_cast(update_peer_sync_records, State) ->
 	case whereis(http_bridge_node) of
 		undefined ->
@@ -343,11 +352,20 @@ handle_cast({update_peer_sync_records, PeerSyncRecords}, State) ->
 		?PEER_SYNC_RECORDS_FREQUENCY_MS,
 		gen_server,
 		cast,
-		[self(), update_peer_sync_records]
+		[self(), check_space_update_peer_sync_records]
 	),
 	{noreply, State#sync_data_state{
 		peer_sync_records = PeerSyncRecords
 	}};
+
+handle_cast(check_space_sync_random_interval, State) ->
+	case ar_storage:get_free_space() - ?DISK_DATA_BUFFER_SIZE > 0 of
+		true ->
+			gen_server:cast(self(), {sync_random_interval, []});
+		false ->
+			cast_after(?FREE_SPACE_CHECK_FREQUENCY_MS, check_space_sync_random_interval)
+	end,
+	{noreply, State};
 
 %% Pick a random not synced interval and sync it.
 handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
@@ -367,7 +385,7 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 						?SCAN_CHUNK_INDEX_FOR_MISSING_DATA_FREQUENCY_MS,
 						gen_server,
 						cast,
-						[self(), {sync_random_interval, []}]
+						[self(), check_space_sync_random_interval]
 					),
 					{noreply,
 						State#sync_data_state{ missing_data_cursor = first }};
@@ -391,7 +409,7 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 										?SCAN_CHUNK_INDEX_FOR_MISSING_DATA_FREQUENCY_MS,
 										gen_server,
 										cast,
-										[self(), {sync_random_interval, []}]
+										[self(), check_space_sync_random_interval]
 									);
 								{ok, Peer} ->
 									%% Sync one chunk.
@@ -411,7 +429,7 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 								?SCAN_CHUNK_INDEX_FOR_MISSING_DATA_FREQUENCY_MS,
 								gen_server,
 								cast,
-								[self(), {sync_random_interval, []}]
+								[self(), check_space_sync_random_interval]
 							),
 							{noreply,
 								State#sync_data_state{ missing_data_cursor = NextCursor }}
@@ -421,6 +439,15 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 			gen_server:cast(self(), {sync_chunk, Peer, LeftBound, RightBound}),
 			{noreply, State#sync_data_state{ peer_sync_records = FilteredPeerSyncRecords }}
 	end;
+
+handle_cast(check_space_compact_intervals, State) ->
+	case ar_storage:get_free_space() - ?DISK_DATA_BUFFER_SIZE > 0 of
+		true ->
+			gen_server:cast(self(), compact_intervals);
+		false ->
+			cast_after(?FREE_SPACE_CHECK_FREQUENCY_MS, check_space_compact_intervals)
+	end,
+	{noreply, State};
 
 %% Keep the number of intervals below ?MAX_SHARED_SYNCED_INTERVALS_COUNT,
 %% possibly introducing false positives. Over time, the number of intervals that
@@ -459,7 +486,7 @@ handle_cast(compact_intervals, State) ->
 		?COMPACT_INTERVALS_FREQUENCY_MS,
 		gen_server,
 		cast,
-		[self(), compact_intervals]
+		[self(), check_space_compact_intervals]
 	),
 	{noreply, State#sync_data_state{
 		sync_record = UpdatedSyncRecord,
@@ -467,7 +494,7 @@ handle_cast(compact_intervals, State) ->
 	}};
 
 handle_cast({sync_chunk, _, LeftBound, RightBound}, State) when LeftBound >= RightBound ->
-	gen_server:cast(self(), {sync_random_interval, []}),
+	gen_server:cast(self(), check_space_sync_random_interval),
 	record_v2_index_data_size(State),
 	{noreply, State};
 handle_cast({sync_chunk, Peer, LeftBound, RightBound}, State) ->
@@ -1236,7 +1263,10 @@ add_chunk(State, DataRoot, DataPath, Chunk, Offset, TXSize) ->
 				{Size, Timestamp, TXIDSet} ->
 					DataRootLimit =
 						ar_meta_db:get(max_disk_pool_data_root_buffer_mb) * 1024 * 1024,
-					DiskPoolLimit = ar_meta_db:get(max_disk_pool_buffer_mb) * 1024 * 1024,
+					DiskPoolLimit = min(
+						ar_storage:get_free_space() - ?DISK_DATA_BUFFER_SIZE,
+						ar_meta_db:get(max_disk_pool_buffer_mb) * 1024 * 1024
+					),
 					ChunkSize = byte_size(Chunk),
 					case Size + ChunkSize > DataRootLimit
 							orelse DiskPoolSize + ChunkSize > DiskPoolLimit of
@@ -1403,6 +1433,9 @@ pick_missing_blocks([{H, WeaveSize, _} | CurrentBI], BlockTXPairs) ->
 		_ ->
 			{WeaveSize, lists:reverse(After)}
 	end.
+
+cast_after(Delay, Message) ->
+	timer:apply_after(Delay, gen_server, cast, [self(), Message]).
 
 process_disk_pool_item(State, Key, Value, NextCursor) ->
 	#sync_data_state{

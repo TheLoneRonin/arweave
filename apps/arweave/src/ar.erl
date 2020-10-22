@@ -54,6 +54,7 @@
 		ar_weave,
 		ar_join,
 		ar_data_sync_tests,
+		ar_header_sync_tests,
 		ar_poa_tests,
 		ar_node_tests,
 		ar_fork_recovery_tests,

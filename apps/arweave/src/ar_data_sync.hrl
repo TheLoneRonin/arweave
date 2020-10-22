@@ -2,6 +2,14 @@
 %% a missing chunk after everything we could sync from peers is synced.
 -define(SCAN_CHUNK_INDEX_FOR_MISSING_DATA_FREQUENCY_MS, 100).
 
+%% @doc The frequency of checking for the available disk space after running out of it.
+-define(FREE_SPACE_CHECK_FREQUENCY_MS, 5 * 60 * 1000).
+
+%% @doc The size in bytes of a portion of the disk space reserved for orphaned chunks and
+%% the lag between receiving the up-to-date disk information and stopping to sync historical data.
+%% The node would only sync data if it has at least so much of the available space.
+-define(DISK_DATA_BUFFER_SIZE, 15 * 1024 * 1024 * 1024). % 15 GiB, 5 mins of syncing at 60 MiB/s
+
 %% @doc The number of peer sync records to consult each time we look for an interval to sync.
 -define(CONSULT_PEER_RECORDS_COUNT, 5).
 %% @doc The number of best peers to pick ?CONSULT_PEER_RECORDS_COUNT from, to fetch the
